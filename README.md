@@ -67,6 +67,57 @@ their previous contents.
 
 **A hard-coded date range would have broken the first incremental run.** A check that said "no games after the day I backfilled" would have failed the moment a new game landed. I replaced it with a range from the season opener to the current date, and filtered Silver to final games so postponed games cannot block the pipeline.
 
+## Setup
+
+Built and tested on Databricks Free Edition (serverless compute, Unity Catalog).
+
+1. **Clone the repo** into a Databricks Git folder (Workspace, then Create, then Git folder).
+2. **Create the schema and volume.** Run this once in a notebook, adjusting the catalog name
+   if yours is not `workspace`:
+   ```sql
+   -- Schema that holds every table in the project
+   CREATE SCHEMA IF NOT EXISTS workspace.nba;
+   -- Volume that holds the raw API responses
+   CREATE VOLUME IF NOT EXISTS workspace.nba.raw;
+   ```
+3. **Backfill the season once.** Open `notebooks/01_bronze_ingest`, set the `start_date` widget
+   to `2026-10-20` and `end_date` to a recent date, and run it. A full backfill makes about
+   one API call per game plus one per day, with a pause between calls, so it takes several minutes.
+4. **Run the rest once.** Run `02_silver_transform`, then `03_gold_aggregates`.
+5. **Create the job.** Make a Databricks job named `nba_pipeline` with three notebook tasks:
+   `bronze_ingest`, then `silver_transform`, then `gold_aggregates`, each depending on the
+   one before it. Give `bronze_ingest` 2 retries (5 minutes apart) and a 60-minute timeout.
+   Add a daily schedule at 12:00 UTC and a failure notification.
+
+After the backfill, leave the date widgets blank. The job then fetches the last 3 days
+ending yesterday (UTC) each run.
+
+## Limitations
+
+- **The data source is unofficial.** ESPN's endpoints are undocumented and can change
+  without notice. The label-order check and the quality gates are there to turn that
+  kind of change into a stopped run instead of bad data.
+- **Season to date only.** The pipeline covers the current season from opening night.
+  Conference and division standings are not modeled, because the source data used
+  does not include them.
+- **Full rebuilds.** Bronze, Silver, and Gold are rebuilt from complete inputs on every run.
+  This is simple and idempotent at this size, but would need incremental loading
+  (for example Auto Loader and `MERGE`) for many seasons.
+- **Free Edition constraints.** There is no uptime guarantee, compute is serverless only,
+  and exceeding the fair-usage quota can block runs for the rest of the day.
+  Free Edition is intended for learning and personal use, not production workloads.
+- **No automated tests yet.** Correctness is enforced by the runtime quality gates,
+  not by a unit test suite.
+
+## Possible next steps
+
+These are ideas, not implemented:
+
+- Unit tests for `quality.py` and the API client's retry logic
+- A dashboard on the Gold tables
+- Delta table constraints as a second layer of validation
+- Auto Loader for incremental Bronze loading
+- A CI check that runs the tests on every push
 **A transient storage error during a job run.** One run failed with a volume error (`Errno 126`) while writing a file. A re-run succeeded, so I added a retry on the Bronze task, and the pipeline raises before loading Bronze if any fetch failed, so downstream tasks never run on incomplete data.
 
 **Dividing by zero.** Databricks runs Spark in ANSI mode, where division by zero and bad casts raise errors instead of returning null. I used `try_cast` and `try_divide` so missing data becomes null, which is what "no attempts" and "did not play" should be.
